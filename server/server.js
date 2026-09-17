@@ -1,7 +1,8 @@
 const express = require('express');
 const cors = require('cors');
+const helmet = require('helmet');
 const dotenv = require('dotenv');
-const path = require('path');
+const mongoose = require('mongoose');
 const connectDB = require('./config/db');
 const errorHandler = require('./middleware/errorHandler');
 
@@ -13,7 +14,9 @@ const app = express();
 // Connect Database
 connectDB();
 
-// Middleware
+// Security & Middleware
+app.use(helmet({ crossOriginResourcePolicy: false }));
+
 const corsOptions = {
   origin: process.env.CLIENT_URL ? process.env.CLIENT_URL.split(',') : '*',
   credentials: true,
@@ -22,14 +25,25 @@ app.use(cors(corsOptions));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Health Check Endpoint
+// Health Check Endpoint with Database Status Validation
 app.get('/api/health', (req, res) => {
-  res.json({
-    status: 'UP',
+  const dbState = mongoose.connection.readyState;
+  const isDbConnected = dbState === 1;
+
+  const responsePayload = {
+    success: isDbConnected,
+    status: isDbConnected ? 'healthy' : 'unhealthy',
+    database: isDbConnected ? 'connected' : dbState === 2 ? 'connecting' : 'disconnected',
     system: 'Sales & Management Assistant API',
     timestamp: new Date().toISOString(),
     env: process.env.NODE_ENV || 'development',
-  });
+  };
+
+  if (!isDbConnected) {
+    return res.status(503).json(responsePayload);
+  }
+
+  res.json(responsePayload);
 });
 
 // Auto-seed default users if database is empty
@@ -105,10 +119,28 @@ app.use(errorHandler);
 
 const PORT = process.env.PORT || 5000;
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`===================================================`);
   console.log(`🚀 Sales & Management Assistant API Server running`);
   console.log(`📍 Port: ${PORT}`);
   console.log(`🌐 Health: http://localhost:${PORT}/api/health`);
   console.log(`===================================================`);
 });
+
+// Graceful Shutdown
+const handleShutdown = async (signal) => {
+  console.log(`[Server] Graceful shutdown initiated (${signal})...`);
+  server.close(async () => {
+    try {
+      await mongoose.connection.close();
+      console.log('[Database] MongoDB connection closed.');
+    } catch (err) {
+      console.error('[Database Error] Error closing MongoDB connection:', err.message);
+    } finally {
+      process.exit(0);
+    }
+  });
+};
+
+process.on('SIGINT', () => handleShutdown('SIGINT'));
+process.on('SIGTERM', () => handleShutdown('SIGTERM'));
