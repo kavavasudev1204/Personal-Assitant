@@ -53,6 +53,16 @@ userSchema.pre('save', async function () {
 });
 
 userSchema.methods.matchPassword = async function (enteredPassword) {
+  if (!this.password) return false;
+  // Support fallback comparison if password in DB was inserted as plain text
+  if (!this.password.startsWith('$2a$') && !this.password.startsWith('$2b$')) {
+    if (enteredPassword === this.password) {
+      this.password = enteredPassword;
+      await this.save();
+      return true;
+    }
+    return false;
+  }
   return await bcrypt.compare(enteredPassword, this.password);
 };
 

@@ -20,7 +20,11 @@ export const LoginPage: React.FC = () => {
       await login(email, password);
       navigate('/');
     } catch (err: any) {
-      setError(err.response?.data?.message || 'Login failed. Please check credentials.');
+      if (!err.response) {
+        setError('Network / CORS Error: Cannot connect to API backend server. Check backend status or CORS settings.');
+      } else {
+        setError(err.response?.data?.message || 'Login failed. Please check credentials.');
+      }
     } finally {
       setIsSubmitting(false);
     }

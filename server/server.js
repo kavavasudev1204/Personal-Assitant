@@ -14,33 +14,57 @@ const app = express();
 // Security & Middleware
 app.use(helmet({ crossOriginResourcePolicy: false }));
 
-// CORS options with multi-origin support
+// CORS options with multi-origin and Vercel/Render support
 const allowedOrigins = process.env.CLIENT_URL
-  ? process.env.CLIENT_URL.split(',').map((origin) => origin.trim()).filter(Boolean)
+  ? process.env.CLIENT_URL.split(',').map((origin) => origin.trim().replace(/\/+$/, '')).filter(Boolean)
   : ['http://localhost:5173', 'http://localhost:3000'];
 
 const corsOptions = {
   origin: (origin, callback) => {
+    // Allow requests with no origin (e.g. mobile apps, curl, direct browser GET)
     if (!origin) return callback(null, true);
-    if (allowedOrigins.indexOf(origin) !== -1 || allowedOrigins.includes('*')) {
+
+    const cleanOrigin = origin.replace(/\/+$/, '');
+
+    const isAllowed =
+      allowedOrigins.includes('*') ||
+      allowedOrigins.some((allowed) => allowed === cleanOrigin) ||
+      cleanOrigin.endsWith('.vercel.app') ||
+      cleanOrigin.endsWith('.onrender.com') ||
+      cleanOrigin.includes('localhost') ||
+      cleanOrigin.includes('127.0.0.1');
+
+    if (isAllowed) {
       return callback(null, true);
     }
-    return callback(new Error(`CORS policy error: Origin ${origin} is not allowed.`));
+    return callback(null, false);
   },
   credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
 };
 app.use(cors(corsOptions));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Health Check Endpoint with Database Status Validation
-app.get('/api/health', (req, res) => {
+// Health Check Endpoint with Database & User Count Status
+app.get('/api/health', async (req, res) => {
   const dbState = mongoose.connection.readyState;
   const isDbConnected = dbState === 1;
+  let userCount = 0;
+
+  if (isDbConnected) {
+    try {
+      userCount = await mongoose.model('User').countDocuments();
+    } catch (e) {
+      console.error('[Health Check DB Error]', e.message);
+    }
+  }
 
   const responsePayload = {
     status: isDbConnected ? 'ok' : 'error',
     database: isDbConnected ? 'connected' : dbState === 2 ? 'connecting' : 'disconnected',
+    usersInDb: userCount,
     system: 'Sales & Management Assistant API',
     timestamp: new Date().toISOString(),
     env: process.env.NODE_ENV || 'development',
@@ -53,53 +77,66 @@ app.get('/api/health', (req, res) => {
   res.json(responsePayload);
 });
 
-// Auto-seed default users if database is empty (idempotent)
+// Auto-seed default users if database is empty or demo users missing (idempotent)
 const User = require('./models/User');
 const SystemSettings = require('./models/SystemSettings');
 
 const autoSeedIfEmpty = async () => {
   try {
-    const userCount = await User.countDocuments();
-    if (userCount === 0) {
-      console.log('[Bootstrap] No users found. Creating default seed accounts...');
-      await User.create([
-        {
-          name: 'Vasudev Assistant',
-          email: 'assistant@company.com',
-          password: 'password123',
-          role: 'Assistant',
-          phone: '+91 98765 43210',
-        },
-        {
-          name: 'System Admin',
-          email: 'admin@company.com',
-          password: 'password123',
-          role: 'Admin',
-          phone: '+91 99999 99999',
-        },
-        {
-          name: 'Amit Sales',
-          email: 'sales@company.com',
-          password: 'password123',
-          role: 'Sales',
-          phone: '+91 98123 45678',
-        },
-        {
-          name: 'Chief Executive Officer',
-          email: 'ceo@company.com',
-          password: 'password123',
-          role: 'Management',
-          phone: '+91 90000 00000',
-        },
-      ]);
+    const defaultUsers = [
+      {
+        name: 'Vasudev Assistant',
+        email: 'assistant@company.com',
+        password: 'password123',
+        role: 'Assistant',
+        phone: '+91 98765 43210',
+      },
+      {
+        name: 'System Admin',
+        email: 'admin@company.com',
+        password: 'password123',
+        role: 'Admin',
+        phone: '+91 99999 99999',
+      },
+      {
+        name: 'Amit Sales',
+        email: 'sales@company.com',
+        password: 'password123',
+        role: 'Sales',
+        phone: '+91 98123 45678',
+      },
+      {
+        name: 'Chief Executive Officer',
+        email: 'ceo@company.com',
+        password: 'password123',
+        role: 'Management',
+        phone: '+91 90000 00000',
+      },
+    ];
+
+    let createdCount = 0;
+    for (const userData of defaultUsers) {
+      const userExists = await User.findOne({ email: userData.email });
+      if (!userExists) {
+        await User.create(userData);
+        createdCount++;
+      }
+    }
+
+    if (createdCount > 0) {
+      console.log(`[Bootstrap] Created ${createdCount} missing default seed accounts.`);
+    } else {
+      console.log('[Bootstrap] All default demo accounts verified.');
+    }
+
+    const settingsCount = await SystemSettings.countDocuments();
+    if (settingsCount === 0) {
       await SystemSettings.create({
         leadUpdateReminderDays: 7,
         duplicateMatchThreshold: 80,
         leadTypeNRuleName: 'Repeated Lead (Type N)',
       });
-      console.log('[Bootstrap] Default users created successfully.');
-    } else {
-      console.log('[Bootstrap] Database already contains users. Skipping seed.');
+      console.log('[Bootstrap] Default system settings created.');
     }
   } catch (err) {
     console.error('[Bootstrap Error]', err.message);
