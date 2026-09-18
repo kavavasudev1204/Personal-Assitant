@@ -11,14 +11,22 @@ dotenv.config();
 
 const app = express();
 
-// Connect Database
-connectDB();
-
 // Security & Middleware
 app.use(helmet({ crossOriginResourcePolicy: false }));
 
+// CORS options with multi-origin support
+const allowedOrigins = process.env.CLIENT_URL
+  ? process.env.CLIENT_URL.split(',').map((origin) => origin.trim()).filter(Boolean)
+  : ['http://localhost:5173', 'http://localhost:3000'];
+
 const corsOptions = {
-  origin: process.env.CLIENT_URL ? process.env.CLIENT_URL.split(',') : '*',
+  origin: (origin, callback) => {
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.indexOf(origin) !== -1 || allowedOrigins.includes('*')) {
+      return callback(null, true);
+    }
+    return callback(new Error(`CORS policy error: Origin ${origin} is not allowed.`));
+  },
   credentials: true,
 };
 app.use(cors(corsOptions));
@@ -31,8 +39,7 @@ app.get('/api/health', (req, res) => {
   const isDbConnected = dbState === 1;
 
   const responsePayload = {
-    success: isDbConnected,
-    status: isDbConnected ? 'healthy' : 'unhealthy',
+    status: isDbConnected ? 'ok' : 'error',
     database: isDbConnected ? 'connected' : dbState === 2 ? 'connecting' : 'disconnected',
     system: 'Sales & Management Assistant API',
     timestamp: new Date().toISOString(),
@@ -46,7 +53,7 @@ app.get('/api/health', (req, res) => {
   res.json(responsePayload);
 });
 
-// Auto-seed default users if database is empty
+// Auto-seed default users if database is empty (idempotent)
 const User = require('./models/User');
 const SystemSettings = require('./models/SystemSettings');
 
@@ -90,14 +97,14 @@ const autoSeedIfEmpty = async () => {
         duplicateMatchThreshold: 80,
         leadTypeNRuleName: 'Repeated Lead (Type N)',
       });
-      console.log('[Bootstrap] Default users created successfully: assistant@company.com / password123');
+      console.log('[Bootstrap] Default users created successfully.');
+    } else {
+      console.log('[Bootstrap] Database already contains users. Skipping seed.');
     }
   } catch (err) {
     console.error('[Bootstrap Error]', err.message);
   }
 };
-
-setTimeout(autoSeedIfEmpty, 2000);
 
 // API Routes
 app.use('/api/auth', require('./routes/authRoutes'));
@@ -119,28 +126,45 @@ app.use(errorHandler);
 
 const PORT = process.env.PORT || 5000;
 
-const server = app.listen(PORT, () => {
-  console.log(`===================================================`);
-  console.log(`🚀 Sales & Management Assistant API Server running`);
-  console.log(`📍 Port: ${PORT}`);
-  console.log(`🌐 Health: http://localhost:${PORT}/api/health`);
-  console.log(`===================================================`);
-});
+const startServer = async () => {
+  try {
+    // 1. Connect to Database (Atlas or memory DB if USE_MEMORY_DB=true)
+    await connectDB();
 
-// Graceful Shutdown
-const handleShutdown = async (signal) => {
-  console.log(`[Server] Graceful shutdown initiated (${signal})...`);
-  server.close(async () => {
-    try {
-      await mongoose.connection.close();
-      console.log('[Database] MongoDB connection closed.');
-    } catch (err) {
-      console.error('[Database Error] Error closing MongoDB connection:', err.message);
-    } finally {
-      process.exit(0);
-    }
-  });
+    // 2. Idempotent seed check
+    await autoSeedIfEmpty();
+
+    // 3. Start Express server only after DB is ready
+    const server = app.listen(PORT, () => {
+      console.log(`===================================================`);
+      console.log(`🚀 Sales & Management Assistant API Server running`);
+      console.log(`📍 Port: ${PORT}`);
+      console.log(`🌐 Health: http://localhost:${PORT}/api/health`);
+      console.log(`===================================================`);
+    });
+
+    // Graceful Shutdown
+    const handleShutdown = async (signal) => {
+      console.log(`[Server] Graceful shutdown initiated (${signal})...`);
+      server.close(async () => {
+        try {
+          await mongoose.connection.close();
+          console.log('[Database] MongoDB connection closed.');
+        } catch (err) {
+          console.error('[Database Error] Error closing MongoDB connection:', err.message);
+        } finally {
+          process.exit(0);
+        }
+      });
+    };
+
+    process.on('SIGINT', () => handleShutdown('SIGINT'));
+    process.on('SIGTERM', () => handleShutdown('SIGTERM'));
+  } catch (err) {
+    console.error('[Server] Startup aborted because database connection failed:', err.message);
+    process.exit(1);
+  }
 };
 
-process.on('SIGINT', () => handleShutdown('SIGINT'));
-process.on('SIGTERM', () => handleShutdown('SIGTERM'));
+startServer();
+
